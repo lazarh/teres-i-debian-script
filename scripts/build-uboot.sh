@@ -27,6 +27,7 @@ TFA_SHA256=""  # Set to SHA256 of the tarball to enable verification
 UBOOT_VERSION="2024.01"
 UBOOT_URL="https://ftp.denx.de/pub/u-boot/u-boot-${UBOOT_VERSION}.tar.bz2"
 UBOOT_SHA256=""  # Set to SHA256 of the tarball to enable verification
+UBOOT_PATCH_MODE="${UBOOT_PATCH_MODE:-all}"  # all|none (none keeps host-only build fixes)
 
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 # U-Boot uses ARCH=arm for ALL ARM targets (32-bit and 64-bit alike).
@@ -40,15 +41,41 @@ BUILD_DIR="${REPO_ROOT}/build/uboot"
 SOURCES_DIR="${REPO_ROOT}/build/sources"
 TFA_SRC="${SOURCES_DIR}/arm-trusted-firmware-${TFA_VERSION#v}"
 TFA_BL31="${SOURCES_DIR}/bl31-sun50i_a64.bin"
-UBOOT_SRC="${SOURCES_DIR}/u-boot-${UBOOT_VERSION}"
 PATCHES_DIR="${REPO_ROOT}/patches/uboot"
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+extract_tarball_tree() {
+    local tarball="$1"
+    local topdir="$2"
+    local destination="$3"
+    local tmpdir
+
+    tmpdir="$(mktemp -d "${SOURCES_DIR}/.extract-XXXXXX")"
+    tar -xjf "${tarball}" -C "${tmpdir}"
+    [[ -d "${tmpdir}/${topdir}" ]] || die "Could not locate ${topdir} after extraction"
+    mv "${tmpdir}/${topdir}" "${destination}"
+    rmdir "${tmpdir}"
+}
+
 command -v "${CROSS_COMPILE}gcc" >/dev/null || die "${CROSS_COMPILE}gcc not found — run scripts/install-deps.sh"
 command -v mkimage              >/dev/null || die "mkimage not found — install u-boot-tools"
+
+case "${UBOOT_PATCH_MODE}" in
+    all)
+        UBOOT_SRC="${SOURCES_DIR}/u-boot-${UBOOT_VERSION}"
+        APPLY_UBOOT_PATCHES=1
+        ;;
+    none)
+        UBOOT_SRC="${SOURCES_DIR}/u-boot-${UBOOT_VERSION}-vanilla"
+        APPLY_UBOOT_PATCHES=0
+        ;;
+    *)
+        die "Unsupported UBOOT_PATCH_MODE='${UBOOT_PATCH_MODE}' (expected: all or none)"
+        ;;
+esac
 
 mkdir -p "${BUILD_DIR}" "${SOURCES_DIR}"
 
@@ -114,22 +141,40 @@ fi
 
 if [[ ! -d "${UBOOT_SRC}" ]]; then
     echo "==> Extracting U-Boot..."
-    tar -xjf "${UBOOT_TARBALL}" -C "${SOURCES_DIR}"
+    extract_tarball_tree "${UBOOT_TARBALL}" "u-boot-${UBOOT_VERSION}" "${UBOOT_SRC}"
 fi
 
 # ── Apply patches ──────────────────────────────────────────────────────────
 
 PATCH_STAMP="${UBOOT_SRC}/.patched"
-if [[ ! -f "${PATCH_STAMP}" ]]; then
-    echo "==> Applying U-Boot patches..."
-    for patch in "${PATCHES_DIR}"/*.patch; do
-        [[ -f "${patch}" ]] || continue
-        echo "    Applying: $(basename "${patch}")"
-        if ! patch -N -d "${UBOOT_SRC}" -p1 < "${patch}"; then
-            echo "    WARNING: patch $(basename "${patch}") did not apply cleanly — continuing anyway"
-        fi
-    done
-    touch "${PATCH_STAMP}"
+if (( APPLY_UBOOT_PATCHES )); then
+    if [[ ! -f "${PATCH_STAMP}" ]]; then
+        echo "==> Applying U-Boot patches..."
+        for patch in "${PATCHES_DIR}"/*.patch; do
+            [[ -f "${patch}" ]] || continue
+            echo "    Applying: $(basename "${patch}")"
+            if ! patch -N -d "${UBOOT_SRC}" -p1 < "${patch}"; then
+                echo "    WARNING: patch $(basename "${patch}") did not apply cleanly — continuing anyway"
+            fi
+        done
+        touch "${PATCH_STAMP}"
+    fi
+else
+    if [[ ! -f "${PATCH_STAMP}" ]]; then
+        echo "==> U-Boot patch mode: none (skipping Teres/runtime patches, keeping host build fixes)"
+        for patch in "${PATCHES_DIR}"/*.patch; do
+            [[ -f "${patch}" ]] || continue
+            case "$(basename "${patch}")" in
+                0001-pylibfdt-fix-SWIG_Python_AppendOutput-arity-for-SWIG-4.2.patch)
+                    echo "    Applying host compatibility: $(basename "${patch}")"
+                    if ! patch -N -d "${UBOOT_SRC}" -p1 < "${patch}"; then
+                        echo "    WARNING: patch $(basename "${patch}") did not apply cleanly — continuing anyway"
+                    fi
+                    ;;
+            esac
+        done
+        touch "${PATCH_STAMP}"
+    fi
 fi
 
 # ── Configure U-Boot ──────────────────────────────────────────────────────

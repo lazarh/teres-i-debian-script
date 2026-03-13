@@ -11,6 +11,8 @@
 #   HOSTNAME=myteres    — set board hostname (default: teres-i)
 #   WIFI_SSID=MyNetwork — pre-configure WiFi (requires WIFI_PASSWORD)
 #   WIFI_PASSWORD=secret — WPA2 passphrase for WIFI_SSID
+#   BOOT_RETRY_TIMEOUT=90 — optional forced reboot timer in userspace (0 disables)
+#   BOOT_RETRY_MAX_REBOOTS=3 — max automatic reboot attempts before giving up
 #
 # Produces: debian-rootfs/
 # Consumed by: scripts/assemble-sd-image.sh
@@ -25,6 +27,8 @@ MODULES_DIR="${KERNEL_BUILD}/modules"
 HOSTNAME="${HOSTNAME:-teres-i}"
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASSWORD="${WIFI_PASSWORD:-}"
+BOOT_RETRY_TIMEOUT="${BOOT_RETRY_TIMEOUT:-0}"
+BOOT_RETRY_MAX_REBOOTS="${BOOT_RETRY_MAX_REBOOTS:-3}"
 ARCH=arm64
 SUITE=trixie
 MIRROR=http://deb.debian.org/debian
@@ -58,6 +62,8 @@ trap umount_chroot EXIT
 
 command -v debootstrap          >/dev/null || die "debootstrap not found — run scripts/install-deps.sh"
 command -v qemu-aarch64-static  >/dev/null || die "qemu-user-static not found — run scripts/install-deps.sh"
+[[ "${BOOT_RETRY_TIMEOUT}" =~ ^[0-9]+$ ]] || die "BOOT_RETRY_TIMEOUT must be an integer number of seconds"
+[[ "${BOOT_RETRY_MAX_REBOOTS}" =~ ^[0-9]+$ ]] || die "BOOT_RETRY_MAX_REBOOTS must be an integer"
 
 # ── First stage debootstrap ─────────────────────────────────────────────────
 
@@ -220,6 +226,121 @@ chroot "${SYSROOT}" systemctl enable resize-rootfs.service || true
 echo "==> Embedding install-to-nand.sh..."
 install -m 0755 "${SCRIPT_DIR}/install-to-nand.sh" \
     "${SYSROOT}/usr/local/sbin/install-to-nand.sh"
+
+# ── Optional boot-retry reboot service ───────────────────────────────────────
+
+echo "==> Installing optional boot-retry reboot service..."
+
+cat > "${SYSROOT}/usr/local/sbin/boot-retry-reboot.sh" <<'REBOOT_SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+CONFIG="/etc/default/boot-retry-reboot"
+CANCEL_FILE="/run/boot-retry-reboot.cancel"
+STATE_DIR="/var/lib/boot-retry-reboot"
+COUNT_FILE="${STATE_DIR}/count"
+
+[[ -r "${CONFIG}" ]] || exit 0
+. "${CONFIG}"
+
+: "${BOOT_RETRY_TIMEOUT:=0}"
+: "${BOOT_RETRY_MAX_REBOOTS:=3}"
+[[ "${BOOT_RETRY_TIMEOUT}" =~ ^[0-9]+$ ]] || {
+    echo "boot-retry-reboot: invalid BOOT_RETRY_TIMEOUT='${BOOT_RETRY_TIMEOUT}'" >&2
+    exit 1
+}
+[[ "${BOOT_RETRY_MAX_REBOOTS}" =~ ^[0-9]+$ ]] || {
+    echo "boot-retry-reboot: invalid BOOT_RETRY_MAX_REBOOTS='${BOOT_RETRY_MAX_REBOOTS}'" >&2
+    exit 1
+}
+
+display_ready() {
+    local connector status modes_file
+
+    for connector in /sys/class/drm/card*-*; do
+        [[ -e "${connector}" ]] || continue
+        [[ -f "${connector}/status" ]] || continue
+        status="$(cat "${connector}/status" 2>/dev/null || true)"
+        [[ "${status}" == "connected" ]] || continue
+
+        modes_file="${connector}/modes"
+        if [[ ! -s "${modes_file}" ]]; then
+            continue
+        fi
+
+        echo "boot-retry-reboot: display ready on $(basename "${connector}")"
+        return 0
+    done
+
+    return 1
+}
+
+if (( BOOT_RETRY_TIMEOUT == 0 )); then
+    exit 0
+fi
+
+echo "boot-retry-reboot: waiting ${BOOT_RETRY_TIMEOUT}s before forced reboot"
+sleep "${BOOT_RETRY_TIMEOUT}"
+
+if [[ -e "${CANCEL_FILE}" ]]; then
+    echo "boot-retry-reboot: canceled via ${CANCEL_FILE}"
+    exit 0
+fi
+
+if display_ready; then
+    rm -f "${COUNT_FILE}"
+    exit 0
+fi
+
+mkdir -p "${STATE_DIR}"
+count=0
+if [[ -r "${COUNT_FILE}" ]]; then
+    count="$(cat "${COUNT_FILE}")"
+fi
+
+if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+    count=0
+fi
+
+if (( count >= BOOT_RETRY_MAX_REBOOTS )); then
+    echo "boot-retry-reboot: maximum reboot attempts (${BOOT_RETRY_MAX_REBOOTS}) reached, not rebooting"
+    exit 0
+fi
+
+count=$((count + 1))
+echo "${count}" > "${COUNT_FILE}"
+
+echo "boot-retry-reboot: no DRM display detected, reboot attempt ${count}/${BOOT_RETRY_MAX_REBOOTS}"
+echo "boot-retry-reboot: rebooting"
+exec systemctl --force --force reboot
+REBOOT_SCRIPT
+chmod 0755 "${SYSROOT}/usr/local/sbin/boot-retry-reboot.sh"
+
+cat > "${SYSROOT}/etc/systemd/system/boot-retry-reboot.service" <<'UNIT'
+[Unit]
+Description=Experimental fixed-time boot retry reboot
+After=network.target ssh.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/boot-retry-reboot.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+if (( BOOT_RETRY_TIMEOUT > 0 )); then
+    cat > "${SYSROOT}/etc/default/boot-retry-reboot" <<EOF
+BOOT_RETRY_TIMEOUT=${BOOT_RETRY_TIMEOUT}
+BOOT_RETRY_MAX_REBOOTS=${BOOT_RETRY_MAX_REBOOTS}
+EOF
+    chroot "${SYSROOT}" systemctl enable boot-retry-reboot.service || true
+    echo "    Enabled boot-retry-reboot.service (${BOOT_RETRY_TIMEOUT}s timeout, max ${BOOT_RETRY_MAX_REBOOTS} reboots)."
+else
+    rm -f "${SYSROOT}/etc/default/boot-retry-reboot"
+    chroot "${SYSROOT}" systemctl disable boot-retry-reboot.service >/dev/null 2>&1 || true
+    echo "    Disabled (set BOOT_RETRY_TIMEOUT=N to enable)."
+fi
 
 # ── Copy U-Boot binary to /boot ─────────────────────────────────────────────
 # Stored on the SD card FAT /boot partition so install-to-nand.sh can find it

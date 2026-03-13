@@ -22,6 +22,13 @@ Downloads and compiles TF-A BL31 for `sun50i_a64`, then builds U-Boot with
 - `build/uboot/u-boot-sunxi-with-spl.bin`
 - `build/uboot/boot.scr`
 
+To build the closest thing to a vanilla U-Boot tree on this host, skipping the
+Teres/runtime repo patches while still keeping the required host-build
+compatibility fix:
+```bash
+UBOOT_PATCH_MODE=none scripts/build-uboot.sh
+```
+
 ### 3. Build the kernel
 ```bash
 scripts/build-kernel.sh
@@ -36,6 +43,16 @@ Produces:
 sudo scripts/build-rootfs.sh
 ```
 Produces `debian-rootfs/`.
+
+To include the experimental fixed-time reboot workaround:
+```bash
+sudo BOOT_RETRY_TIMEOUT=90 BOOT_RETRY_MAX_REBOOTS=3 scripts/build-rootfs.sh
+```
+This enables `boot-retry-reboot.service`, which waits the configured number of
+seconds after boot, checks whether Linux sees a connected DRM display with
+available modes, and only then reboots if no display was detected. It also
+stops retrying after the configured maximum reboot count. You can still stop
+the service manually or create `/run/boot-retry-reboot.cancel`.
 
 To pre-configure the hostname or WiFi:
 ```bash
@@ -102,7 +119,9 @@ partition. Remove the SD card and reboot; the board will boot from eMMC.
 | Partition 1 (FAT32, 80 MiB) | `/boot` — Image, DTB, boot.scr |
 | Partition 2 (ext4, rest) | `/` — Debian rootfs |
 
-The eMMC `boot.scr` loads the kernel from `mmc 2:1` and boots with
+Linux names the internal eMMC as `/dev/mmcblk2`, but U-Boot sees it as `mmc 1`
+on the Teres-I (`mmc 2` is the SDIO WiFi device, not storage). The generated
+eMMC `boot.scr` therefore loads the kernel from `mmc 1:1` and boots with
 `root=/dev/mmcblk2p2 rootfstype=ext4`.
 
 ## Build configuration

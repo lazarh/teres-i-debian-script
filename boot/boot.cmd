@@ -5,6 +5,11 @@
 #   mmc@1c10000 → mmc1             : SDIO WiFi (BCM43438/RTL8723BS) — no block device
 #   mmc@1c11000 → mmc2 / mmcblk2  : internal eMMC/NAND
 #
+# U-Boot MMC enumeration on the same board:
+#   mmc 0 : SD card slot
+#   mmc 1 : internal eMMC
+#   mmc 2 : SDIO WiFi (non-storage)
+#
 # The SDIO WiFi chip does NOT create a mmcblk device, so the SD card is
 # always mmcblk0 regardless of WiFi chip presence.
 #

@@ -109,8 +109,9 @@ echo "==> Generating eMMC boot script..."
 EMMC_BOOT_CMD=$(mktemp /tmp/emmc-boot.XXXXXX.cmd)
 cat > "${EMMC_BOOT_CMD}" <<'BOOTCMD'
 # Boot from eMMC on Teres-I
-load mmc 2:1 ${kernel_addr_r} Image
-load mmc 2:1 ${fdt_addr_r} sun50i-a64-teres-i.dtb
+# Linux names internal storage mmcblk2, but U-Boot sees it as mmc 1.
+load mmc 1:1 ${kernel_addr_r} Image
+load mmc 1:1 ${fdt_addr_r} sun50i-a64-teres-i.dtb
 setenv bootargs console=ttyS0,115200 console=tty1 root=/dev/mmcblk2p2 rootfstype=ext4 rootwait panic=10 ${extra}
 booti ${kernel_addr_r} - ${fdt_addr_r}
 BOOTCMD
@@ -161,4 +162,4 @@ echo "      ${ROOT_PART} : /     (ext4, remaining)"
 echo ""
 echo "    U-Boot will auto-detect the absent SD card and boot from eMMC."
 echo "    If it does not, enter U-Boot shell and run:"
-echo "      => setenv boot_targets 'mmc2 mmc0'; saveenv; reset"
+echo "      => setenv boot_targets 'mmc1 mmc0'; saveenv; reset"
